@@ -214,8 +214,49 @@ int index_save(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_add(Index *index, const char *path) {
-    // TODO: Implement file staging
-    // (See Lab Appendix for logical steps)
-    (void)index; (void)path;
-    return -1;
+     // Read the file contents
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "error: cannot open '%s'\n", path);
+        return -1;
+    }
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (file_size < 0) { fclose(f); return -1; }
+ 
+    uint8_t *contents = malloc((size_t)file_size + 1);
+    if (!contents) { fclose(f); return -1; }
+    size_t read_bytes = fread(contents, 1, (size_t)file_size, f);
+    fclose(f);
+    if (read_bytes != (size_t)file_size) { free(contents); return -1; }
+ 
+    // Write blob to object store
+    ObjectID blob_id;
+    if (object_write(OBJ_BLOB, contents, (size_t)file_size, &blob_id) != 0) {
+        free(contents); return -1;
+    }
+    free(contents);
+ 
+    // Get file metadata
+    struct stat st;
+    if (lstat(path, &st) != 0) return -1;
+ 
+    uint32_t mode = S_ISDIR(st.st_mode) ? 0040000 :
+                    (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
+ 
+    // Update or add entry
+    IndexEntry *e = index_find(index, path);
+    if (!e) {
+        if (index->count >= MAX_INDEX_ENTRIES) return -1;
+        e = &index->entries[index->count++];
+    }
+ 
+    e->mode = mode;
+    e->hash = blob_id;
+    e->mtime_sec = (uint64_t)st.st_mtime;
+    e->size = (uint32_t)st.st_size;
+    snprintf(e->path, sizeof(e->path), "%s", path);
+ 
+    return index_save(index);
 }
