@@ -105,41 +105,44 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     else if (type == OBJ_COMMIT) type_str = "commit";
     else return -1;
 
-    // 1. Build the full object: header ("<type> <size>\0") + data
+    // 1. Build header: "<type> <size>\0"
     char header[64];
     int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len);
     if (header_len < 0 || (size_t)header_len >= sizeof(header)) return -1;
 
     size_t full_len = header_len + 1 + len;
+
     void *full_data = malloc(full_len);
     if (!full_data) return -1;
 
-    memcpy(full_data, header, header_len + 1); // Include the null byte
+    // 🔥 CRITICAL FIX: explicitly place '\0'
+    memcpy(full_data, header, header_len);
+    ((char *)full_data)[header_len] = '\0';
+
     if (len > 0 && data) {
         memcpy((char *)full_data + header_len + 1, data, len);
     }
 
-    // 2. Compute SHA-256 hash of the FULL object
+    // 2. Compute hash
     compute_hash(full_data, full_len, id_out);
 
-    // 3. Check deduplication
+    // 3. Dedup
     if (object_exists(id_out)) {
         free(full_data);
-        return 0; // Object already exists, success
+        return 0;
     }
 
-    // 4. Create shard directory (.pes/objects/XX/)
+    // 4. Create shard dir
     char hex[HASH_HEX_SIZE + 1];
     hash_to_hex(id_out, hex);
+
     char shard_dir[512];
     snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex);
-    
-    // Attempt to create the directory (ignore error if it already exists)
-    mkdir(shard_dir, 0755); 
+    mkdir(shard_dir, 0755);
 
-    // 5. Write to a temporary file in the same shard directory
-    char temp_path[1024];
-    snprintf(temp_path, sizeof(temp_path), "%s/temp_XXXXXX", shard_dir);
+    // 5. Temp file
+    char temp_path[512];
+    snprintf(temp_path, sizeof(temp_path), "%s/tmpXXXXXX", shard_dir);
     int fd = mkstemp(temp_path);
     if (fd < 0) {
         free(full_data);
@@ -152,26 +155,23 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
         free(full_data);
         return -1;
     }
+
     free(full_data);
 
-    // 6. fsync() the temporary file to ensure data reaches disk
-    if (fsync(fd) < 0) {
-        close(fd);
-        unlink(temp_path);
-        return -1;
-    }
+    // 6. fsync file
+    fsync(fd);
     close(fd);
 
-    // 7. rename() the temp file to the final path (atomic on POSIX)
+    // 7. Final path
     char final_path[512];
     object_path(id_out, final_path, sizeof(final_path));
-    
+
     if (rename(temp_path, final_path) < 0) {
         unlink(temp_path);
         return -1;
     }
 
-    // 8. Open and fsync() the shard directory to persist the rename
+    // 8. fsync dir
     int dir_fd = open(shard_dir, O_RDONLY);
     if (dir_fd >= 0) {
         fsync(dir_fd);
